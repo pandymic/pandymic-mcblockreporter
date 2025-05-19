@@ -1,0 +1,8 @@
+name: McBlockReporter
+version: 1.0
+main: com.pandymic.dev.mcblockreporter.McBlockReporterPlugin
+api-version: 1.19
+commands:
+  httpblockinfo:
+    description: Retrieves and sends block information to a REST API with optional extra data or target selector.
+    usage: /httpblockinfo <x> <y> <z> [extraData|@selector]
