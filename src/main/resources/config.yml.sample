@@ -1,3 +1,24 @@
 # Configuration for the Pandymic McBlockReporter plugin
-api-endpoint: "http://localhost:48081/api/v1/report"
+apiUrl: "http://localhost:48081/api/v1"
+
 # See https://github.com/pandymic/pandymic-mcrcon for sample Web Service
+
+reportEndpoint: "/report"
+# Configuration for monitored blocks
+monitoredBlocks:
+  # List of blocks to monitor
+  # Each item requires: world, x, y, z
+  locations:
+    - world: "world"
+      x: -468
+      y: 74
+      z: -254
+    # Add more locations as needed
+  method: "PUT"
+  endpoint: "/monitor"
+  update:
+      method: "PUT"
+      endpoint: "/monitor"
+  batch:
+      method: "POST"
+      endpoint: "/monitor"

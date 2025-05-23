@@ -6,3 +6,6 @@ commands:
   httpblockinfo:
     description: Retrieves and sends block information to a REST API with optional extra data or target selector.
     usage: /httpblockinfo <x> <y> <z> [extraData|@selector]
+  localblockinfo:
+    description: Displays block information locally as JSON.
+    usage: /localblockinfo <x> <y> <z> [extraData|@selector]

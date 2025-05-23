@@ -22,9 +22,10 @@ public class HttpBlockInfoCommand implements CommandExecutor {
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (command.getName().equalsIgnoreCase("httpblockinfo")) {
+        String commandName = command.getName().toLowerCase();
+        if (commandName.equals("httpblockinfo") || commandName.equals("localblockinfo")) {
             if (args.length < 3 || args.length > 4) {
-                sender.sendMessage(ChatColor.RED + "Usage: /httpblockinfo <x> <y> <z> [extraData|@selector]");
+                sender.sendMessage(ChatColor.RED + "Usage: /" + label + " <x> <y> <z> [extraData|@selector]");
                 return true;
             }
 
@@ -56,15 +57,22 @@ public class HttpBlockInfoCommand implements CommandExecutor {
                     location = new Location(plugin.getServer().getWorlds().get(0), x, y, z);
                 }
 
-                plugin.sendBlockData(location, extraData);
-                sender.sendMessage(ChatColor.GREEN + "Retrieving and sending block information for " + x + ", " + y + ", " + z + (extraData != null ? " with extra data: " + extraData : "") + "...");
+                if (commandName.equals("httpblockinfo")) {
+                    plugin.sendBlockData(location, extraData);
+                    sender.sendMessage(ChatColor.GREEN + "Retrieving and sending block information for " + x + ", " + y + ", " + z + (extraData != null ? " with extra data: " + extraData : "") + "...");
+                } else if (commandName.equals("localblockinfo")) {
+                    String jsonData = plugin.buildBlockDataJson(location, extraData);
+                    sender.sendMessage(ChatColor.AQUA + "Block Data JSON for " + x + ", " + y + ", " + z + (extraData != null ? " with extra data: " + extraData : "") + ":");
+                    sender.sendMessage(jsonData);
+                }
+                
                 return true;
 
             } catch (NumberFormatException e) {
                 sender.sendMessage(ChatColor.RED + "Invalid coordinates. Please enter numbers for x, y, and z.");
                 return true;
             } catch (Exception e) {
-                sender.sendMessage(ChatColor.RED + "An error occurred: " + e.getMessage());
+                sender.sendMessage(ChatColor.RED + "An error occurred while processing the command: " + e.getMessage());
                 plugin.getLogger().log(java.util.logging.Level.SEVERE, "Error processing httpblockinfo command:", e);
                 return true;
             }
