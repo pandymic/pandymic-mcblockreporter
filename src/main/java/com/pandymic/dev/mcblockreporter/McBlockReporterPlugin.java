@@ -1,8 +1,10 @@
 package com.pandymic.dev.mcblockreporter;
 
 import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
 import org.bukkit.Bukkit;
 import org.bukkit.Axis;
+import org.bukkit.ChatColor;
 import org.bukkit.Location;
 import org.bukkit.block.BlockFace;
 import org.bukkit.block.Block;
@@ -12,8 +14,10 @@ import org.bukkit.block.data.type.*;
 import org.bukkit.Instrument;
 import org.bukkit.Note;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.command.CommandSender;
 import org.bukkit.command.PluginCommand;
 
+import java.lang.reflect.Type;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -21,6 +25,7 @@ import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.logging.Level;
 import java.util.Set;
@@ -39,7 +44,10 @@ public class McBlockReporterPlugin extends JavaPlugin {
 
     private String monitorUpdateUrl;
     private String monitorUpdateMethod;
-    
+
+    private String blocksListUrl;
+    private String blocksRegisterUrl;
+
     // Changed from Set<Location> to Map<Location, Integer> to store index
     private final Map<Location, Integer> monitoredBlockIndexMap = new HashMap<>();
     private final Set<Location> updateCooldownLocations = new HashSet<>();
@@ -73,6 +81,13 @@ public class McBlockReporterPlugin extends JavaPlugin {
         String monitorBatchEndpointPath = getConfig().getString("monitoredBlocks.batch.endpoint", monitorDefaultEndpointPath);
         monitorBatchUrl = apiUrl + monitorBatchEndpointPath;
 
+        // Registry endpoints: which blocks are monitored is owned by the web
+        // service, not this config file. See refreshMonitoredLocationsFromService().
+        String blocksListEndpointPath = getConfig().getString("monitoredBlocks.listEndpoint", "/blocks");
+        blocksListUrl = apiUrl + blocksListEndpointPath;
+        String blocksRegisterEndpointPath = getConfig().getString("monitoredBlocks.registerEndpoint", "/blocks");
+        blocksRegisterUrl = apiUrl + blocksRegisterEndpointPath;
+
         PluginCommand httpBlockInfoCmd = getCommand("httpblockinfo");
         if (httpBlockInfoCmd != null) {
             httpBlockInfoCmd.setExecutor(new HttpBlockInfoCommand(this));
@@ -85,13 +100,22 @@ public class McBlockReporterPlugin extends JavaPlugin {
         } else {
             getLogger().log(Level.SEVERE, "Command 'localblockinfo' not found in plugin.yml! Please ensure it is registered.");
         }
+        PluginCommand registerBlockMonitorCmd = getCommand("registerblockmonitor");
+        if (registerBlockMonitorCmd != null) {
+            registerBlockMonitorCmd.setExecutor(new RegisterBlockMonitorCommand(this));
+        } else {
+            getLogger().log(Level.SEVERE, "Command 'registerblockmonitor' not found in plugin.yml! Please ensure it is registered.");
+        }
         getLogger().log(Level.INFO, "Base API URL: " + apiUrl);
         getLogger().log(Level.INFO, "Command Report URL: " + commandReportUrl + " (Method: " + commandReportMethod + ")");
         getLogger().log(Level.INFO, "Monitor Batch URL: " + monitorBatchUrl + " (Method: " + monitorBatchMethod + ")");
         getLogger().log(Level.INFO, "Monitor Update URL: " + monitorUpdateUrl + " (Method: " + monitorUpdateMethod + ")");
+        getLogger().log(Level.INFO, "Monitored Blocks List URL: " + blocksListUrl);
+        getLogger().log(Level.INFO, "Monitored Blocks Register URL: " + blocksRegisterUrl);
 
-        loadMonitoredLocations();
-        sendInitialMonitoredData();
+        long refreshIntervalTicks = getConfig().getLong("monitoredBlocks.refreshIntervalSeconds", 30) * 20L;
+        refreshMonitoredLocationsFromService(true);
+        getServer().getScheduler().runTaskTimer(this, () -> refreshMonitoredLocationsFromService(false), refreshIntervalTicks, refreshIntervalTicks);
         getServer().getPluginManager().registerEvents(new BlockMonitorListener(this), this);
     }
 
@@ -100,34 +124,113 @@ public class McBlockReporterPlugin extends JavaPlugin {
         getLogger().info("McBlockReporterPlugin has been disabled!");
     }
 
-    private void loadMonitoredLocations() {
-        monitoredBlockIndexMap.clear();
-        java.util.List<Map<?, ?>> locationsFromConfig = getConfig().getMapList("monitoredBlocks.locations");
-        if (locationsFromConfig == null || locationsFromConfig.isEmpty()) {
-            getLogger().info("No locations configured for monitoring.");
-            return;
-        }
+    /**
+     * Fetches the current monitored-block registry from the web service and
+     * rebuilds monitoredBlockIndexMap from it. The HTTP call runs off the
+     * main thread; applying the result to Bukkit API state is hopped back
+     * onto the main thread. Called once on enable (pushInitialDataAfterRefresh
+     * = true, so the freshly-loaded blocks get an initial state push) and
+     * again on a repeating timer to pick up registry changes made via the
+     * Web UI, REST API, or another server instance without needing a restart.
+     */
+    private void refreshMonitoredLocationsFromService(boolean pushInitialDataAfterRefresh) {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(blocksListUrl))
+                .GET()
+                .build();
 
-        int currentIndex = 0; // Start indexing from 0
-        for (Map<?, ?> locMap : locationsFromConfig) {
-            try {
-                // Ensure all keys exist before trying to access them
-                String worldName = (String) locMap.get("world");
-                int x = ((Number) locMap.get("x")).intValue();
-                int y = ((Number) locMap.get("y")).intValue();
-                int z = ((Number) locMap.get("z")).intValue();
-
-                org.bukkit.World world = Bukkit.getWorld(worldName);
-                if (world == null) {
-                    getLogger().warning("World '" + worldName + "' not found for monitored location. Skipping.");
-                    continue;
+        httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+            .thenAccept(response -> {
+                if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                    getLogger().warning("Failed to fetch monitored block registry from " + blocksListUrl + ". Status: " + response.statusCode());
+                    return;
                 }
-                monitoredBlockIndexMap.put(new Location(world, x, y, z), currentIndex++);
-            } catch (Exception e) {
-                getLogger().log(Level.SEVERE, "Error parsing a monitored location from config: " + locMap.toString(), e);
+                Type listType = new TypeToken<List<Map<String, Object>>>(){}.getType();
+                List<Map<String, Object>> entries = gson.fromJson(response.body(), listType);
+                getServer().getScheduler().runTask(this, () -> {
+                    applyRegistryEntries(entries);
+                    if (pushInitialDataAfterRefresh) {
+                        sendInitialMonitoredData();
+                    }
+                });
+            })
+            .exceptionally(e -> {
+                getLogger().log(Level.WARNING, "Error fetching monitored block registry from " + blocksListUrl, e);
+                return null;
+            });
+    }
+
+    private void applyRegistryEntries(List<Map<String, Object>> entries) {
+        Map<Location, Integer> updated = new HashMap<>();
+        if (entries != null) {
+            for (Map<String, Object> entryMap : entries) {
+                try {
+                    String worldName = (String) entryMap.get("world");
+                    int x = ((Number) entryMap.get("x")).intValue();
+                    int y = ((Number) entryMap.get("y")).intValue();
+                    int z = ((Number) entryMap.get("z")).intValue();
+                    int id = ((Number) entryMap.get("id")).intValue();
+
+                    org.bukkit.World world = Bukkit.getWorld(worldName);
+                    if (world == null) {
+                        getLogger().warning("World '" + worldName + "' not found for registry entry id " + id + ". Skipping.");
+                        continue;
+                    }
+                    updated.put(new Location(world, x, y, z), id);
+                } catch (Exception e) {
+                    getLogger().log(Level.SEVERE, "Error parsing a monitored block registry entry: " + entryMap, e);
+                }
             }
         }
-        getLogger().info("Loaded " + monitoredBlockIndexMap.size() + " locations for monitoring.");
+        monitoredBlockIndexMap.clear();
+        monitoredBlockIndexMap.putAll(updated);
+        getLogger().info("Refreshed monitored block registry: now tracking " + monitoredBlockIndexMap.size() + " block(s).");
+    }
+
+    /**
+     * Registers a block with the web service's registry and, once accepted,
+     * starts tracking it locally right away (no need to wait for the next
+     * periodic refresh) and pushes its current state so the Web UI shows
+     * real data immediately instead of nulls.
+     */
+    public void registerMonitoredBlock(Location location, String label, CommandSender sender) {
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("world", location.getWorld().getName());
+        requestBody.put("x", location.getBlockX());
+        requestBody.put("y", location.getBlockY());
+        requestBody.put("z", location.getBlockZ());
+        if (label != null) {
+            requestBody.put("label", label);
+        }
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(blocksRegisterUrl))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(requestBody)))
+                .build();
+
+        httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+            .thenAccept(response -> {
+                if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                    getLogger().warning("Failed to register block at " + location + ". Status: " + response.statusCode() + ", Response: " + response.body());
+                    getServer().getScheduler().runTask(this, () -> sender.sendMessage(ChatColor.RED + "Failed to register block: " + response.body()));
+                    return;
+                }
+                Type entryType = new TypeToken<Map<String, Object>>(){}.getType();
+                Map<String, Object> entry = gson.fromJson(response.body(), entryType);
+                int id = ((Number) entry.get("id")).intValue();
+
+                getServer().getScheduler().runTask(this, () -> {
+                    monitoredBlockIndexMap.put(location, id);
+                    sender.sendMessage(ChatColor.GREEN + "Registered block at " + location.getBlockX() + ", " + location.getBlockY() + ", " + location.getBlockZ() + " as id " + id + ".");
+                    handleMonitoredBlockUpdate(location.getBlock());
+                });
+            })
+            .exceptionally(e -> {
+                getLogger().log(Level.SEVERE, "Error registering block at " + location, e);
+                getServer().getScheduler().runTask(this, () -> sender.sendMessage(ChatColor.RED + "Error registering block: " + e.getMessage()));
+                return null;
+            });
     }
 
 

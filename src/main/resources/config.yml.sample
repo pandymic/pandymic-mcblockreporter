@@ -1,19 +1,18 @@
 # Configuration for the Pandymic McBlockReporter plugin
 apiUrl: "http://localhost:48081/api/v1"
 
-# See https://github.com/pandymic/pandymic-mcrcon for sample Web Service
+# See https://github.com/pandymic/pandymic-mcservice for the web service.
 
 reportEndpoint: "/report"
-# Configuration for monitored blocks
+# Configuration for monitored blocks. Which blocks are monitored is a
+# registry owned by the web service, not this file -- register a block via
+# the in-game /registerblockmonitor command, a REST call to registerEndpoint,
+# or the service's Web UI. This plugin fetches the current registry from
+# listEndpoint on enable and again every refreshIntervalSeconds.
 monitoredBlocks:
-  # List of blocks to monitor
-  # Each item requires: world, x, y, z
-  locations:
-    - world: "world"
-      x: -468
-      y: 74
-      z: -254
-    # Add more locations as needed
+  listEndpoint: "/blocks"
+  registerEndpoint: "/blocks"
+  refreshIntervalSeconds: 30
   method: "PUT"
   endpoint: "/monitor"
   update:

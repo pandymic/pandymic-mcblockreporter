@@ -9,3 +9,6 @@ commands:
   localblockinfo:
     description: Displays block information locally as JSON.
     usage: /localblockinfo <x> <y> <z> [extraData|@selector]
+  registerblockmonitor:
+    description: Registers a block with the web service's monitored-block registry, so its state is tracked and reported going forward.
+    usage: /registerblockmonitor [x y z] [label]
