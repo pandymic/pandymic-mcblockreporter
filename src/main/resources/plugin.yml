@@ -12,3 +12,6 @@ commands:
   registerblockmonitor:
     description: Registers a block with the web service's monitored-block registry, so its state is tracked and reported going forward.
     usage: /registerblockmonitor [x y z] [label]
+  scanrailnetwork:
+    description: Traces the connected rail network from the nearest rail to a coordinate and reports it to the web service.
+    usage: /scanrailnetwork <world> <x> <y|~> <z> [label]

@@ -21,3 +21,8 @@ monitoredBlocks:
   batch:
       method: "POST"
       endpoint: "/monitor"
+
+# Rail network scanning (/scanrailnetwork). The scan result (track
+# positions/types/junctions) is POSTed here in one shot once a scan finishes.
+railNetworks:
+  ingestEndpoint: "/rail-networks/ingest"

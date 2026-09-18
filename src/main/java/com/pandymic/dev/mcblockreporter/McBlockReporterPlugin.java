@@ -48,6 +48,8 @@ public class McBlockReporterPlugin extends JavaPlugin {
     private String blocksListUrl;
     private String blocksRegisterUrl;
 
+    private String railNetworksIngestUrl;
+
     // Changed from Set<Location> to Map<Location, Integer> to store index
     private final Map<Location, Integer> monitoredBlockIndexMap = new HashMap<>();
     private final Set<Location> updateCooldownLocations = new HashSet<>();
@@ -88,6 +90,9 @@ public class McBlockReporterPlugin extends JavaPlugin {
         String blocksRegisterEndpointPath = getConfig().getString("monitoredBlocks.registerEndpoint", "/blocks");
         blocksRegisterUrl = apiUrl + blocksRegisterEndpointPath;
 
+        String railNetworksIngestEndpointPath = getConfig().getString("railNetworks.ingestEndpoint", "/rail-networks/ingest");
+        railNetworksIngestUrl = apiUrl + railNetworksIngestEndpointPath;
+
         PluginCommand httpBlockInfoCmd = getCommand("httpblockinfo");
         if (httpBlockInfoCmd != null) {
             httpBlockInfoCmd.setExecutor(new HttpBlockInfoCommand(this));
@@ -105,6 +110,12 @@ public class McBlockReporterPlugin extends JavaPlugin {
             registerBlockMonitorCmd.setExecutor(new RegisterBlockMonitorCommand(this));
         } else {
             getLogger().log(Level.SEVERE, "Command 'registerblockmonitor' not found in plugin.yml! Please ensure it is registered.");
+        }
+        PluginCommand scanRailNetworkCmd = getCommand("scanrailnetwork");
+        if (scanRailNetworkCmd != null) {
+            scanRailNetworkCmd.setExecutor(new ScanRailNetworkCommand(this));
+        } else {
+            getLogger().log(Level.SEVERE, "Command 'scanrailnetwork' not found in plugin.yml! Please ensure it is registered.");
         }
         getLogger().log(Level.INFO, "Base API URL: " + apiUrl);
         getLogger().log(Level.INFO, "Command Report URL: " + commandReportUrl + " (Method: " + commandReportMethod + ")");
@@ -233,6 +244,51 @@ public class McBlockReporterPlugin extends JavaPlugin {
             });
     }
 
+    /**
+     * POSTs a completed RailNetworkScanner.Result to the web service in one
+     * shot. The scan itself already ran synchronously on the main thread
+     * (see ScanRailNetworkCommand); this call itself is fire-and-forget --
+     * the service ingests it, auto-registers any junction levers/switch
+     * rails into the block registry, and broadcasts a WebSocket update, all
+     * independent of this plugin.
+     */
+    public void reportRailNetworkScan(String world, int x, Integer y, int z, String label,
+                                       RailNetworkScanner.Result result, CommandSender sender) {
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("world", world);
+        Map<String, Object> start = new HashMap<>();
+        start.put("x", x);
+        start.put("y", y);
+        start.put("z", z);
+        payload.put("start", start);
+        if (label != null) {
+            payload.put("label", label);
+        }
+        payload.put("nodes", result.nodes);
+        payload.put("edges", result.edges);
+        payload.put("truncated", result.truncated);
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(railNetworksIngestUrl))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(payload)))
+                .build();
+
+        httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+            .thenAccept(response -> {
+                if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                    getLogger().warning("Failed to report rail network scan. Status: " + response.statusCode() + ", Response: " + response.body());
+                    getServer().getScheduler().runTask(this, () -> sender.sendMessage(ChatColor.RED + "Failed to report scan to service: " + response.body()));
+                    return;
+                }
+                getServer().getScheduler().runTask(this, () -> sender.sendMessage(ChatColor.GREEN + "Rail network reported to service."));
+            })
+            .exceptionally(e -> {
+                getLogger().log(Level.SEVERE, "Error reporting rail network scan", e);
+                getServer().getScheduler().runTask(this, () -> sender.sendMessage(ChatColor.RED + "Error reporting scan: " + e.getMessage()));
+                return null;
+            });
+    }
 
     public Map<String, Object> buildBlockDataMap(Location location, Object extraData) {
         Block block = location.getBlock();
