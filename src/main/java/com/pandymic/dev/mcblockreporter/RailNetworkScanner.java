@@ -32,7 +32,21 @@ import java.util.Set;
 public class RailNetworkScanner {
 
     private static final int SEARCH_RADIUS = 3;
-    private static final int MAX_NODES = 5000;
+    // Fallback only, used if the caller doesn't supply one (see scan()
+    // below) -- the real cap is config-driven (railNetworks.maxNodes in
+    // config.yml, read by ScanRailNetworkCommand) specifically so raising
+    // it later is a restart, not a rebuild. Originally a hardcoded 5000;
+    // raised once already after a real network ("choo_choo", a
+    // map-spanning powered-rail line) hit that cap with the vast majority
+    // of its track still unmapped -- prompting this to become configurable
+    // rather than requiring another rebuild next time. Still a hard stop,
+    // not a soft target: with very few junctions expected on a line like
+    // that (confirmed: zero found in the first 5000 nodes), growth here is
+    // bounded by actual track length, not combinatorial branching, so
+    // raising it is safe in the sense that it can't runaway-explode -- it
+    // can only ever do proportionally more of the same fast, read-only
+    // work.
+    private static final int DEFAULT_MAX_NODES = 50000;
 
     private static final Set<Material> RAIL_MATERIALS = new HashSet<>(Arrays.asList(
             Material.RAIL, Material.POWERED_RAIL, Material.DETECTOR_RAIL, Material.ACTIVATOR_RAIL
@@ -81,6 +95,10 @@ public class RailNetworkScanner {
     }
 
     public static Result scan(World world, int x, Integer y, int z) {
+        return scan(world, x, y, z, DEFAULT_MAX_NODES);
+    }
+
+    public static Result scan(World world, int x, Integer y, int z, int maxNodes) {
         Result result = new Result();
         Block start = findStartingRail(world, x, y, z);
         if (null == start) {
@@ -88,7 +106,7 @@ public class RailNetworkScanner {
                     + x + "," + (null != y ? y : "<any y>") + "," + z;
             return result;
         }
-        traverse(start, result);
+        traverse(start, result, maxNodes);
         return result;
     }
 
@@ -175,7 +193,7 @@ public class RailNetworkScanner {
             {0, 0, 1}, {0, 1, 1}, {0, 0, -1}, {0, 1, -1},
     };
 
-    private static void traverse(Block start, Result result) {
+    private static void traverse(Block start, Result result, int maxNodes) {
         Set<String> visited = new HashSet<>();
         Set<String> edgeKeys = new HashSet<>();
         Deque<Block> queue = new ArrayDeque<>();
@@ -183,7 +201,7 @@ public class RailNetworkScanner {
         visited.add(posKey(start));
 
         while (!queue.isEmpty()) {
-            if (result.nodes.size() >= MAX_NODES) {
+            if (result.nodes.size() >= maxNodes) {
                 result.truncated = true;
                 break;
             }

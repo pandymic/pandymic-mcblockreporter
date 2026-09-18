@@ -47,7 +47,12 @@ public class ScanRailNetworkCommand implements CommandExecutor {
             sender.sendMessage(ChatColor.YELLOW + "Scanning rail network from "
                     + x + "," + (null != y ? y : "~") + "," + z + " in " + world.getName() + "...");
 
-            RailNetworkScanner.Result result = RailNetworkScanner.scan(world, x, y, z);
+            // Config-driven (not a compiled-in constant) specifically so
+            // raising it for a larger network later is a config edit +
+            // server restart, not a plugin rebuild -- see RailNetworkScanner's
+            // DEFAULT_MAX_NODES comment for why this was made configurable.
+            int maxNodes = plugin.getConfig().getInt("railNetworks.maxNodes", 50000);
+            RailNetworkScanner.Result result = RailNetworkScanner.scan(world, x, y, z, maxNodes);
             if (null != result.error) {
                 sender.sendMessage(ChatColor.RED + result.error);
                 return true;

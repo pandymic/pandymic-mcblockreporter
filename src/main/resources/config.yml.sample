@@ -26,3 +26,8 @@ monitoredBlocks:
 # positions/types/junctions) is POSTed here in one shot once a scan finishes.
 railNetworks:
   ingestEndpoint: "/rail-networks/ingest"
+  # Safety cap on how many rail blocks a single scan will traverse before
+  # stopping early (truncated: true in the result) rather than continuing
+  # indefinitely. Configurable specifically so raising it for a larger
+  # network is a config edit + server restart, not a plugin rebuild.
+  maxNodes: 50000
