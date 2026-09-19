@@ -150,6 +150,7 @@ public class McBlockReporterPlugin extends JavaPlugin {
             getLogger().warning("Plugin 'playerPositions.wsUrl' is not configured in config.yml! Player positions will not be pushed to the map.");
         } else {
             playerPositionBroadcaster = new PlayerPositionBroadcaster(this, playerPositionsWsUrl, playerPositionsPushIntervalTicks);
+            getServer().getPluginManager().registerEvents(playerPositionBroadcaster, this);
             playerPositionBroadcaster.start();
         }
     }
