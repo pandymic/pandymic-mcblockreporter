@@ -136,8 +136,8 @@ public class McBlockReporterPlugin extends JavaPlugin {
         getLogger().log(Level.INFO, "Monitored Blocks Register URL: " + blocksRegisterUrl);
 
         long refreshIntervalTicks = getConfig().getLong("monitoredBlocks.refreshIntervalSeconds", 30) * 20L;
-        refreshMonitoredLocationsFromService(true);
-        getServer().getScheduler().runTaskTimer(this, () -> refreshMonitoredLocationsFromService(false), refreshIntervalTicks, refreshIntervalTicks);
+        refreshMonitoredLocationsFromService();
+        getServer().getScheduler().runTaskTimer(this, this::refreshMonitoredLocationsFromService, refreshIntervalTicks, refreshIntervalTicks);
         getServer().getPluginManager().registerEvents(new BlockMonitorListener(this), this);
     }
 
@@ -150,12 +150,11 @@ public class McBlockReporterPlugin extends JavaPlugin {
      * Fetches the current monitored-block registry from the web service and
      * rebuilds monitoredBlockIndexMap from it. The HTTP call runs off the
      * main thread; applying the result to Bukkit API state is hopped back
-     * onto the main thread. Called once on enable (pushInitialDataAfterRefresh
-     * = true, so the freshly-loaded blocks get an initial state push) and
-     * again on a repeating timer to pick up registry changes made via the
-     * Web UI, REST API, or another server instance without needing a restart.
+     * onto the main thread. Called once on enable and again on a repeating
+     * timer to pick up registry changes made via the Web UI, REST API, or
+     * another server instance without needing a restart.
      */
-    private void refreshMonitoredLocationsFromService(boolean pushInitialDataAfterRefresh) {
+    private void refreshMonitoredLocationsFromService() {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(blocksListUrl))
                 .GET()
@@ -169,12 +168,7 @@ public class McBlockReporterPlugin extends JavaPlugin {
                 }
                 Type listType = new TypeToken<List<Map<String, Object>>>(){}.getType();
                 List<Map<String, Object>> entries = gson.fromJson(response.body(), listType);
-                getServer().getScheduler().runTask(this, () -> {
-                    applyRegistryEntries(entries);
-                    if (pushInitialDataAfterRefresh) {
-                        sendInitialMonitoredData();
-                    }
-                });
+                getServer().getScheduler().runTask(this, () -> applyRegistryEntries(entries));
             })
             .exceptionally(e -> {
                 getLogger().log(Level.WARNING, "Error fetching monitored block registry from " + blocksListUrl, e);
@@ -182,8 +176,22 @@ public class McBlockReporterPlugin extends JavaPlugin {
             });
     }
 
+    /**
+     * Rebuilds monitoredBlockIndexMap from the service's current registry
+     * and pushes an initial state report for whichever locations weren't
+     * already known -- both a block added since this plugin started (the
+     * periodic-refresh case) and the very first refresh at onEnable, where
+     * *everything* is "new" since the map starts empty. Previously, only
+     * the onEnable call ever pushed initial data (a one-off flag on the
+     * caller), which meant a block added later -- e.g. every lever/switch-
+     * rail a rail-network scan auto-registers -- sat with unknown material/
+     * properties, and so couldn't be toggled from the Web UI/map, until
+     * something in-game happened to touch it. Folding "push for what's new"
+     * into every refresh fixes that without needing a restart to pick up.
+     */
     private void applyRegistryEntries(List<Map<String, Object>> entries) {
         Map<Location, Integer> updated = new HashMap<>();
+        List<Location> newlyKnown = new ArrayList<>();
         if (entries != null) {
             for (Map<String, Object> entryMap : entries) {
                 try {
@@ -198,7 +206,11 @@ public class McBlockReporterPlugin extends JavaPlugin {
                         getLogger().warning("World '" + worldName + "' not found for registry entry id " + id + ". Skipping.");
                         continue;
                     }
-                    updated.put(new Location(world, x, y, z), id);
+                    Location location = new Location(world, x, y, z);
+                    if (!monitoredBlockIndexMap.containsKey(location)) {
+                        newlyKnown.add(location);
+                    }
+                    updated.put(location, id);
                 } catch (Exception e) {
                     getLogger().log(Level.SEVERE, "Error parsing a monitored block registry entry: " + entryMap, e);
                 }
@@ -207,6 +219,10 @@ public class McBlockReporterPlugin extends JavaPlugin {
         monitoredBlockIndexMap.clear();
         monitoredBlockIndexMap.putAll(updated);
         getLogger().info("Refreshed monitored block registry: now tracking " + monitoredBlockIndexMap.size() + " block(s).");
+
+        if (!newlyKnown.isEmpty()) {
+            sendInitialDataFor(newlyKnown);
+        }
     }
 
     /**
@@ -590,13 +606,10 @@ public class McBlockReporterPlugin extends JavaPlugin {
         sendPayload(this.commandReportUrl, jsonData, this.commandReportMethod);
     }
 
-    private void sendInitialMonitoredData() {
-        if (monitoredBlockIndexMap.isEmpty()) {
-            return;
-        }
-        getLogger().info("Sending initial data for " + monitoredBlockIndexMap.size() + " monitored blocks to " + monitorBatchUrl + " via " + monitorBatchMethod + "...");
+    private void sendInitialDataFor(List<Location> locations) {
+        getLogger().info("Sending initial data for " + locations.size() + " newly-known monitored block(s) to " + monitorBatchUrl + " via " + monitorBatchMethod + "...");
         ArrayList<Map<String, Object>> batchData = new ArrayList<>();
-        for (Location loc : monitoredBlockIndexMap.keySet()) {
+        for (Location loc : locations) {
             // Ensure the world and chunk are loaded before getting block data
             if (!loc.isWorldLoaded() || !loc.getChunk().isLoaded()) {
                 getLogger().warning("Skipping initial data for unloaded location: " + loc.toString());

@@ -1,13 +1,12 @@
 package com.pandymic.dev.mcblockreporter;
 
-import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.Sign;
 import org.bukkit.block.data.BlockData;
+import org.bukkit.block.data.Powerable;
 import org.bukkit.block.data.Rail;
-import org.bukkit.block.data.type.Switch;
 import org.bukkit.block.sign.Side;
 
 import java.util.ArrayDeque;
@@ -19,16 +18,8 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * Traces a connected rail network from a starting point via BFS. Read-only
- * for ordinary track -- never places or breaks a block -- with one
- * deliberate exception: at each junction found, its controlling lever is
- * briefly switched both ways to record which rail_shape each position
- * produces (a junction Node's poweredShape/unpoweredShape), then restored
- * to whatever state it was actually in before the scan touched it. This is
- * the only reliable way to know which lever position connects to which
- * neighbor, short of hand-modeling Minecraft's own rail-junction-
- * resolution rules -- needed for route planning (see pandymic-mcservice's
- * /rail-networks/:id/route).
+ * Traces a connected rail network from a starting point via BFS. Fully
+ * read-only -- never places, breaks, or changes any block.
  *
  * Each rail's current Rail.Shape (already resolved by the game engine, e.g.
  * in response to nearby redstone/lever state) gives its two "active"
@@ -42,6 +33,30 @@ import java.util.Set;
  * active branch is controlled by that lever. A sign nearby any node (not
  * just junctions -- an ordinary stop along straight track is the common
  * case) marks it a "station," named after the sign's first line.
+ *
+ * At each junction, this records which of the two possible shapes is
+ * associated with the lever's *current* powered state -- e.g. if the lever
+ * reads powered right now and the switch-rail's current shape is
+ * SOUTH_EAST, that pairing goes in as poweredShape, with unpoweredShape
+ * left null (unknown). Route planning (pandymic-mcservice's
+ * /rail-networks/:id/route) needs *both* pairings to work out which lever
+ * state a given connection needs -- the *other* one is filled in
+ * separately, opportunistically, by the service watching real block
+ * reports over time (see pandymic-mcservice's actions.js monitor handler)
+ * or by a fresh re-scan after someone flips the lever by hand.
+ *
+ * This scanner does **not** attempt to toggle a lever itself to observe
+ * both states directly, despite that seeming like the obvious approach --
+ * confirmed live, several independent ways (direct BlockData mutation, a
+ * dispatched `setblock` command, the same plus forcing a re-notify on the
+ * lever's support block, all with and without an added settle delay, and
+ * even bare-replacing the switch-rail immediately after toggling), that a
+ * command-driven lever state change does not reliably cause the connected
+ * rail to recompute its shape on this server -- even though the lever's
+ * own reported state updates correctly every time. A genuine in-game
+ * interaction (a real right-click) does trigger it correctly; nothing
+ * remote-controlled that was tried does. Rather than keep guessing at
+ * that, this only ever records what's genuinely, currently true.
  */
 public class RailNetworkScanner {
 
@@ -92,14 +107,12 @@ public class RailNetworkScanner {
         public boolean isIntersection = false;
         public boolean isJunction = false;
         public Pos lever = null;
-        // Only set when isJunction -- the switch-rail's own Rail.Shape with
-        // its controlling lever powered vs. unpowered, captured by briefly
-        // toggling it during the scan (see class Javadoc). Route planning
-        // uses these to work out which lever state a desired connection
-        // needs; either can come back null if the switch-rail wasn't
-        // actually a Rail anymore by the time it was re-read (unexpected,
-        // but route planning has to treat "unknown" as "can't use this
-        // junction" rather than assume).
+        // Only set when isJunction -- whichever of these matches the
+        // lever's *current* powered state gets this node's own `shape`;
+        // the other starts null (see class Javadoc -- filled in later,
+        // opportunistically, not by this scan). Route planning treats a
+        // still-null one as "unknown, can't route through this junction
+        // that way yet" rather than assuming.
         public String poweredShape = null;
         public String unpoweredShape = null;
         public Station station = null;
@@ -273,7 +286,18 @@ public class RailNetworkScanner {
                 if (null != lever) {
                     node.isJunction = true;
                     node.lever = new Pos(lever);
-                    captureJunctionShapes(node, lever, block);
+                    BlockData leverData = lever.getBlockData();
+                    if (leverData instanceof Powerable) {
+                        // Whichever of these two the lever's live state
+                        // currently is, that pairing is genuinely known --
+                        // see class Javadoc for why this scanner doesn't
+                        // try to toggle it itself to also learn the other.
+                        if (((Powerable) leverData).isPowered()) {
+                            node.poweredShape = node.shape;
+                        } else {
+                            node.unpoweredShape = node.shape;
+                        }
+                    }
                 }
             }
 
@@ -311,56 +335,6 @@ public class RailNetworkScanner {
             }
         }
         return null;
-    }
-
-    // Briefly switches `leverBlock` both ways to record what rail_shape
-    // `switchRailBlock` resolves to in each state, then restores whatever
-    // state the lever was actually in before this call -- see the class
-    // Javadoc for why this is the reliable way to learn the mapping
-    // (rather than a one-off side effect, it's the only source of truth
-    // route planning has).
-    //
-    // Dispatches an actual `setblock ...[powered=...]` console command
-    // rather than mutating the lever's BlockData directly and calling
-    // Block#setBlockData(data, true) -- confirmed live (not assumed) that
-    // the direct-mutation approach does *not* reliably trigger the same
-    // redstone-driven rail-shape recalculation a real setblock command
-    // does: a first attempt at this method used it and, against a real
-    // junction on this server, captured the exact same shape for both
-    // powered and unpowered. This project's own existing lever-toggle path
-    // (pandymic-mcservice's PUT /blocks/:id/state) already only ever used
-    // setblock over RCON, never direct BlockData mutation -- dispatching
-    // the equivalent command locally (Bukkit.dispatchCommand, since RCON
-    // commands are themselves just dispatched to this same command system)
-    // matches that proven-reliable path instead of a second, untested one.
-    private static void captureJunctionShapes(Node node, Block leverBlock, Block switchRailBlock) {
-        BlockData leverData = leverBlock.getBlockData();
-        if (!(leverData instanceof Switch)) {
-            return;
-        }
-        Switch lever = (Switch) leverData;
-        boolean originalPowered = lever.isPowered();
-        String face = lever.getFace().toString().toLowerCase();
-        String facing = lever.getFacing().toString().toLowerCase();
-
-        setLeverPowered(leverBlock, face, facing, true);
-        node.poweredShape = readShape(switchRailBlock);
-
-        setLeverPowered(leverBlock, face, facing, false);
-        node.unpoweredShape = readShape(switchRailBlock);
-
-        setLeverPowered(leverBlock, face, facing, originalPowered);
-    }
-
-    private static void setLeverPowered(Block leverBlock, String face, String facing, boolean powered) {
-        String command = "setblock " + leverBlock.getX() + " " + leverBlock.getY() + " " + leverBlock.getZ()
-                + " minecraft:lever[face=" + face + ",facing=" + facing + ",powered=" + powered + "]";
-        Bukkit.dispatchCommand(Bukkit.getConsoleSender(), command);
-    }
-
-    private static String readShape(Block block) {
-        BlockData data = block.getBlockData();
-        return (data instanceof Rail) ? ((Rail) data).getShape().toString() : null;
     }
 
     private static String posKey(Block block) {
