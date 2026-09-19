@@ -16,5 +16,5 @@ commands:
     description: Traces the connected rail network from the nearest rail to a coordinate and reports it to the web service.
     usage: /scanrailnetwork <world> <x> <y|~> <z> [label]
   registerlandmark:
-    description: Registers a named point (defaulting to the player's current position) with the web service's landmark list.
-    usage: /registerlandmark [x y z] [label]
+    description: Registers a named point (defaulting to the player's current position; x/y/z accept vanilla's ~ syntax) with the web service's landmark list. Multi-word names need no quoting.
+    usage: /registerlandmark [x y z] [name...]
