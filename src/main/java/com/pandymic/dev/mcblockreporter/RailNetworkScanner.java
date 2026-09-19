@@ -1,10 +1,14 @@
 package com.pandymic.dev.mcblockreporter;
 
+import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
+import org.bukkit.block.Sign;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.block.data.Rail;
+import org.bukkit.block.data.type.Switch;
+import org.bukkit.block.sign.Side;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -16,7 +20,15 @@ import java.util.Set;
 
 /**
  * Traces a connected rail network from a starting point via BFS. Read-only
- * -- never places or breaks a block.
+ * for ordinary track -- never places or breaks a block -- with one
+ * deliberate exception: at each junction found, its controlling lever is
+ * briefly switched both ways to record which rail_shape each position
+ * produces (a junction Node's poweredShape/unpoweredShape), then restored
+ * to whatever state it was actually in before the scan touched it. This is
+ * the only reliable way to know which lever position connects to which
+ * neighbor, short of hand-modeling Minecraft's own rail-junction-
+ * resolution rules -- needed for route planning (see pandymic-mcservice's
+ * /rail-networks/:id/route).
  *
  * Each rail's current Rail.Shape (already resolved by the game engine, e.g.
  * in response to nearby redstone/lever state) gives its two "active"
@@ -27,7 +39,9 @@ import java.util.Set;
  * more track exists there than a simple pass-through uses. An intersection
  * with a lever nearby (same level, or one block up, in any of the 4
  * cardinal directions) is further marked a "junction": a switch whose
- * active branch is controlled by that lever.
+ * active branch is controlled by that lever. A sign nearby any node (not
+ * just junctions -- an ordinary stop along straight track is the common
+ * case) marks it a "station," named after the sign's first line.
  */
 public class RailNetworkScanner {
 
@@ -60,6 +74,17 @@ public class RailNetworkScanner {
         Pos(Block block) { this.x = block.getX(); this.y = block.getY(); this.z = block.getZ(); }
     }
 
+    public static class Station {
+        public final String name;
+        public final int x, y, z;
+        Station(String name, Block signBlock) {
+            this.name = name;
+            this.x = signBlock.getX();
+            this.y = signBlock.getY();
+            this.z = signBlock.getZ();
+        }
+    }
+
     public static class Node {
         public final int x, y, z;
         public final String material;
@@ -67,6 +92,17 @@ public class RailNetworkScanner {
         public boolean isIntersection = false;
         public boolean isJunction = false;
         public Pos lever = null;
+        // Only set when isJunction -- the switch-rail's own Rail.Shape with
+        // its controlling lever powered vs. unpowered, captured by briefly
+        // toggling it during the scan (see class Javadoc). Route planning
+        // uses these to work out which lever state a desired connection
+        // needs; either can come back null if the switch-rail wasn't
+        // actually a Rail anymore by the time it was re-read (unexpected,
+        // but route planning has to treat "unknown" as "can't use this
+        // junction" rather than assume).
+        public String poweredShape = null;
+        public String unpoweredShape = null;
+        public Station station = null;
 
         Node(Block block, Rail.Shape shape) {
             this.x = block.getX();
@@ -184,10 +220,12 @@ public class RailNetworkScanner {
             {-1, 0, 0}, {-1, 1, 0}, {-1, -1, 0},
     };
 
-    // Positions checked for a controlling lever near an intersection: this
-    // block and one above, in the 4 cardinal directions (including 0,0 --
-    // directly on top of the intersection).
-    private static final int[][] LEVER_SEARCH_OFFSETS = {
+    // Positions checked for a controlling lever near an intersection, or a
+    // station sign near any node: this block and one above, in the 4
+    // cardinal directions (including 0,0 -- directly on top of the block).
+    // Shared between both searches -- geometrically the same "immediately
+    // adjacent" pattern either way.
+    private static final int[][] ADJACENT_SEARCH_OFFSETS = {
             {0, 0, 0}, {0, 1, 0},
             {1, 0, 0}, {1, 1, 0}, {-1, 0, 0}, {-1, 1, 0},
             {0, 0, 1}, {0, 1, 1}, {0, 0, -1}, {0, 1, -1},
@@ -213,6 +251,14 @@ public class RailNetworkScanner {
             Rail rail = (Rail) data;
             Node node = new Node(block, rail.getShape());
 
+            Sign sign = findNearbySign(block);
+            if (null != sign) {
+                String name = sign.getSide(Side.FRONT).getLine(0);
+                if (null != name && !name.trim().isEmpty()) {
+                    node.station = new Station(name.trim(), sign.getBlock());
+                }
+            }
+
             List<Block> railNeighbors = new ArrayList<>();
             for (int[] off : CANDIDATE_NEIGHBOR_OFFSETS) {
                 Block neighbor = block.getRelative(off[0], off[1], off[2]);
@@ -227,6 +273,7 @@ public class RailNetworkScanner {
                 if (null != lever) {
                     node.isJunction = true;
                     node.lever = new Pos(lever);
+                    captureJunctionShapes(node, lever, block);
                 }
             }
 
@@ -247,13 +294,73 @@ public class RailNetworkScanner {
     }
 
     private static Block findNearbyLever(Block block) {
-        for (int[] off : LEVER_SEARCH_OFFSETS) {
+        for (int[] off : ADJACENT_SEARCH_OFFSETS) {
             Block candidate = block.getRelative(off[0], off[1], off[2]);
             if (Material.LEVER == candidate.getType()) {
                 return candidate;
             }
         }
         return null;
+    }
+
+    private static Sign findNearbySign(Block block) {
+        for (int[] off : ADJACENT_SEARCH_OFFSETS) {
+            Block candidate = block.getRelative(off[0], off[1], off[2]);
+            if (candidate.getState() instanceof Sign) {
+                return (Sign) candidate.getState();
+            }
+        }
+        return null;
+    }
+
+    // Briefly switches `leverBlock` both ways to record what rail_shape
+    // `switchRailBlock` resolves to in each state, then restores whatever
+    // state the lever was actually in before this call -- see the class
+    // Javadoc for why this is the reliable way to learn the mapping
+    // (rather than a one-off side effect, it's the only source of truth
+    // route planning has).
+    //
+    // Dispatches an actual `setblock ...[powered=...]` console command
+    // rather than mutating the lever's BlockData directly and calling
+    // Block#setBlockData(data, true) -- confirmed live (not assumed) that
+    // the direct-mutation approach does *not* reliably trigger the same
+    // redstone-driven rail-shape recalculation a real setblock command
+    // does: a first attempt at this method used it and, against a real
+    // junction on this server, captured the exact same shape for both
+    // powered and unpowered. This project's own existing lever-toggle path
+    // (pandymic-mcservice's PUT /blocks/:id/state) already only ever used
+    // setblock over RCON, never direct BlockData mutation -- dispatching
+    // the equivalent command locally (Bukkit.dispatchCommand, since RCON
+    // commands are themselves just dispatched to this same command system)
+    // matches that proven-reliable path instead of a second, untested one.
+    private static void captureJunctionShapes(Node node, Block leverBlock, Block switchRailBlock) {
+        BlockData leverData = leverBlock.getBlockData();
+        if (!(leverData instanceof Switch)) {
+            return;
+        }
+        Switch lever = (Switch) leverData;
+        boolean originalPowered = lever.isPowered();
+        String face = lever.getFace().toString().toLowerCase();
+        String facing = lever.getFacing().toString().toLowerCase();
+
+        setLeverPowered(leverBlock, face, facing, true);
+        node.poweredShape = readShape(switchRailBlock);
+
+        setLeverPowered(leverBlock, face, facing, false);
+        node.unpoweredShape = readShape(switchRailBlock);
+
+        setLeverPowered(leverBlock, face, facing, originalPowered);
+    }
+
+    private static void setLeverPowered(Block leverBlock, String face, String facing, boolean powered) {
+        String command = "setblock " + leverBlock.getX() + " " + leverBlock.getY() + " " + leverBlock.getZ()
+                + " minecraft:lever[face=" + face + ",facing=" + facing + ",powered=" + powered + "]";
+        Bukkit.dispatchCommand(Bukkit.getConsoleSender(), command);
+    }
+
+    private static String readShape(Block block) {
+        BlockData data = block.getBlockData();
+        return (data instanceof Rail) ? ((Rail) data).getShape().toString() : null;
     }
 
     private static String posKey(Block block) {

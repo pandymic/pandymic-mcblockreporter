@@ -31,3 +31,8 @@ railNetworks:
   # indefinitely. Configurable specifically so raising it for a larger
   # network is a config edit + server restart, not a plugin rebuild.
   maxNodes: 50000
+
+# Landmarks (/registerlandmark). A named point, registered once -- unlike
+# monitored blocks, there's no ongoing state to track or report.
+landmarks:
+  registerEndpoint: "/landmarks"
