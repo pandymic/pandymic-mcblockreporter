@@ -52,6 +52,8 @@ public class McBlockReporterPlugin extends JavaPlugin {
 
     private String landmarksRegisterUrl;
 
+    private PlayerPositionBroadcaster playerPositionBroadcaster;
+
     // Changed from Set<Location> to Map<Location, Integer> to store index
     private final Map<Location, Integer> monitoredBlockIndexMap = new HashMap<>();
     private final Set<Location> updateCooldownLocations = new HashSet<>();
@@ -98,6 +100,9 @@ public class McBlockReporterPlugin extends JavaPlugin {
         String landmarksRegisterEndpointPath = getConfig().getString("landmarks.registerEndpoint", "/landmarks");
         landmarksRegisterUrl = apiUrl + landmarksRegisterEndpointPath;
 
+        String playerPositionsWsUrl = getConfig().getString("playerPositions.wsUrl", "UNCONFIGURED_PLAYER_POSITIONS_WS_URL");
+        long playerPositionsPushIntervalTicks = getConfig().getLong("playerPositions.pushIntervalTicks", 10L);
+
         PluginCommand httpBlockInfoCmd = getCommand("httpblockinfo");
         if (httpBlockInfoCmd != null) {
             httpBlockInfoCmd.setExecutor(new HttpBlockInfoCommand(this));
@@ -134,16 +139,31 @@ public class McBlockReporterPlugin extends JavaPlugin {
         getLogger().log(Level.INFO, "Monitor Update URL: " + monitorUpdateUrl + " (Method: " + monitorUpdateMethod + ")");
         getLogger().log(Level.INFO, "Monitored Blocks List URL: " + blocksListUrl);
         getLogger().log(Level.INFO, "Monitored Blocks Register URL: " + blocksRegisterUrl);
+        getLogger().log(Level.INFO, "Player Position Stream URL: " + playerPositionsWsUrl + " (every " + playerPositionsPushIntervalTicks + " ticks)");
 
         long refreshIntervalTicks = getConfig().getLong("monitoredBlocks.refreshIntervalSeconds", 30) * 20L;
         refreshMonitoredLocationsFromService();
         getServer().getScheduler().runTaskTimer(this, this::refreshMonitoredLocationsFromService, refreshIntervalTicks, refreshIntervalTicks);
         getServer().getPluginManager().registerEvents(new BlockMonitorListener(this), this);
+
+        if ("UNCONFIGURED_PLAYER_POSITIONS_WS_URL".equals(playerPositionsWsUrl) || playerPositionsWsUrl.isEmpty()) {
+            getLogger().warning("Plugin 'playerPositions.wsUrl' is not configured in config.yml! Player positions will not be pushed to the map.");
+        } else {
+            playerPositionBroadcaster = new PlayerPositionBroadcaster(this, playerPositionsWsUrl, playerPositionsPushIntervalTicks);
+            playerPositionBroadcaster.start();
+        }
     }
 
     @Override
     public void onDisable() {
         getLogger().info("McBlockReporterPlugin has been disabled!");
+        if (playerPositionBroadcaster != null) {
+            playerPositionBroadcaster.stop();
+        }
+    }
+
+    public HttpClient getHttpClient() {
+        return httpClient;
     }
 
     /**
