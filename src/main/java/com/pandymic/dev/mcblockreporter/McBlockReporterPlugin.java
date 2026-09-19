@@ -177,21 +177,13 @@ public class McBlockReporterPlugin extends JavaPlugin {
     }
 
     /**
-     * Rebuilds monitoredBlockIndexMap from the service's current registry
-     * and pushes an initial state report for whichever locations weren't
-     * already known -- both a block added since this plugin started (the
-     * periodic-refresh case) and the very first refresh at onEnable, where
-     * *everything* is "new" since the map starts empty. Previously, only
-     * the onEnable call ever pushed initial data (a one-off flag on the
-     * caller), which meant a block added later -- e.g. every lever/switch-
-     * rail a rail-network scan auto-registers -- sat with unknown material/
-     * properties, and so couldn't be toggled from the Web UI/map, until
-     * something in-game happened to touch it. Folding "push for what's new"
-     * into every refresh fixes that without needing a restart to pick up.
+     * Rebuilds monitoredBlockIndexMap from the service's current registry,
+     * then re-pushes a fresh state report for *every* currently-known
+     * block, not just newly-added ones -- see 2026-09-19 note below for
+     * why this changed from only pushing what's new.
      */
     private void applyRegistryEntries(List<Map<String, Object>> entries) {
         Map<Location, Integer> updated = new HashMap<>();
-        List<Location> newlyKnown = new ArrayList<>();
         if (entries != null) {
             for (Map<String, Object> entryMap : entries) {
                 try {
@@ -206,11 +198,7 @@ public class McBlockReporterPlugin extends JavaPlugin {
                         getLogger().warning("World '" + worldName + "' not found for registry entry id " + id + ". Skipping.");
                         continue;
                     }
-                    Location location = new Location(world, x, y, z);
-                    if (!monitoredBlockIndexMap.containsKey(location)) {
-                        newlyKnown.add(location);
-                    }
-                    updated.put(location, id);
+                    updated.put(new Location(world, x, y, z), id);
                 } catch (Exception e) {
                     getLogger().log(Level.SEVERE, "Error parsing a monitored block registry entry: " + entryMap, e);
                 }
@@ -220,8 +208,25 @@ public class McBlockReporterPlugin extends JavaPlugin {
         monitoredBlockIndexMap.putAll(updated);
         getLogger().info("Refreshed monitored block registry: now tracking " + monitoredBlockIndexMap.size() + " block(s).");
 
-        if (!newlyKnown.isEmpty()) {
-            sendInitialDataFor(newlyKnown);
+        // 2026-09-19: previously this only re-pushed state for locations
+        // that weren't already known (fixing blocks added after onEnable
+        // sitting with unknown material/properties until touched in-game --
+        // still true, still fixed). Broadened to *every* known block, every
+        // refresh, after confirming live that a junction's switch-rail
+        // genuinely re-switches in response to a real lever flip (the
+        // physical mechanic works) but BlockPhysicsEvent never fires for
+        // it, so BlockMonitorListener never reports the change -- the
+        // switch-rail's reported rail_shape would otherwise go stale
+        // forever after the very first report, breaking both the map's
+        // live opacity indicator and route planning's shape-learning
+        // (railNetworks.recordObservedJunctionState on the service side
+        // depends on exactly this data). Re-pushing everything on this
+        // existing timer (monitoredBlocks.refreshIntervalSeconds, default
+        // 30s) closes that gap without depending on find the "right" event
+        // to listen for -- correctness over minimizing request volume,
+        // given this project's real monitored-block counts are small.
+        if (!monitoredBlockIndexMap.isEmpty()) {
+            sendInitialDataFor(new ArrayList<>(monitoredBlockIndexMap.keySet()));
         }
     }
 
@@ -607,19 +612,22 @@ public class McBlockReporterPlugin extends JavaPlugin {
     }
 
     private void sendInitialDataFor(List<Location> locations) {
-        getLogger().info("Sending initial data for " + locations.size() + " newly-known monitored block(s) to " + monitorBatchUrl + " via " + monitorBatchMethod + "...");
+        getLogger().info("Refreshing state for " + locations.size() + " monitored block(s) to " + monitorBatchUrl + " via " + monitorBatchMethod + "...");
         ArrayList<Map<String, Object>> batchData = new ArrayList<>();
         for (Location loc : locations) {
-            // Ensure the world and chunk are loaded before getting block data
+            // Ensure the world and chunk are loaded before getting block data.
+            // A location skipped here (unloaded right now) just waits for the
+            // *next* periodic refresh to try again -- no longer a one-shot,
+            // so a miss here isn't permanent the way it used to be.
             if (!loc.isWorldLoaded() || !loc.getChunk().isLoaded()) {
-                getLogger().warning("Skipping initial data for unloaded location: " + loc.toString());
+                getLogger().warning("Skipping state refresh for unloaded location: " + loc.toString());
                 continue;
             }
             batchData.add(buildBlockDataMap(loc, null)); // extraData is null for automated sends
         }
 
         if (batchData.isEmpty()) {
-            getLogger().info("No loaded blocks to send in initial batch.");
+            getLogger().info("No loaded blocks to refresh in this batch.");
             return;
         }
 
