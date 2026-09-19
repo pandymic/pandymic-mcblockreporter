@@ -127,6 +127,7 @@ public class PlayerPositionBroadcaster implements Listener {
             entry.put("x", player.getLocation().getX());
             entry.put("y", player.getLocation().getY());
             entry.put("z", player.getLocation().getZ());
+            entry.put("yaw", player.getLocation().getYaw());
             entry.put("dimension", dimensionLabel(player.getWorld().getEnvironment()));
             players.add(entry);
         }
